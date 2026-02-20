@@ -79,7 +79,7 @@ app.use(express.json());
 // ══════════════════════════════════════════════
 const transporter = nodemailer.createTransport({
   host:   'smtp.mail.yahoo.com',
-  port:   465,
+  port:   587,
   secure: true,
   auth: {
     user: process.env.YAHOO_EMAIL,    // ex: saidahmed0610@yahoo.com
