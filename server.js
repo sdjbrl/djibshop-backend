@@ -1,6 +1,6 @@
 // ══════════════════════════════════════════════════════
 //  backend/server.js — Djib's Shop — Railway
-//  MongoDB + Emails (Resend API) + Stripe + PayPal
+//  MongoDB + Emails (Brevo API) + Stripe + PayPal
 // ══════════════════════════════════════════════════════
 require('dotenv').config();
 
@@ -10,7 +10,6 @@ const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
 const crypto     = require('crypto');
-const { Resend } = require('resend');
 const stripe     = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const fetch      = require('node-fetch');
 
@@ -85,23 +84,41 @@ app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ══════════════════════════════════════════════
-//  EMAIL (Resend API — fonctionne sur Railway)
+//  EMAIL (Brevo / ex-Sendinblue — HTTP API)
+//  Fonctionne sur Railway, gratuit, sans domaine
+//  1. Créer un compte sur brevo.com
+//  2. SMTP & API → API Keys → Créer une clé
+//  3. Ajouter dans Railway : BREVO_API_KEY=xkeysib-...
+//  4. Vérifier l'adresse expéditeur dans Brevo → Senders
 // ══════════════════════════════════════════════
-// RESEND_API_KEY=re_XXXXXXXXXX (resend.com → API Keys)
-// FROM_EMAIL=noreply@VOTRE-DOMAINE.com  (domaine vérifié dans Resend)
-// Si pas de domaine vérifié → utiliser onboarding@resend.dev en test
-const resend = new Resend(process.env.RESEND_API_KEY);
-const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'pro.saidahmed@yahoo.com';
+const FROM_NAME  = process.env.FROM_NAME  || "Djib's Shop";
 
 async function sendEmail({ to, subject, html, replyTo }) {
-  const { error } = await resend.emails.send({
-    from:     `Djib's Shop <${FROM_EMAIL}>`,
-    to:       Array.isArray(to) ? to : [to],
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) throw new Error('BREVO_API_KEY manquant dans les variables Railway');
+
+  const body = {
+    sender:  { name: FROM_NAME, email: FROM_EMAIL },
+    to:      Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
     subject,
-    html,
-    reply_to: replyTo,
+    htmlContent: html,
+  };
+  if (replyTo) body.replyTo = { email: replyTo };
+
+  const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'api-key':      apiKey,
+    },
+    body: JSON.stringify(body),
   });
-  if (error) throw new Error('Resend error: ' + JSON.stringify(error));
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error('Brevo error: ' + JSON.stringify(err));
+  }
 }
 
 async function sendOrderNotification({ order, user, items }) {
@@ -265,7 +282,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       expiresAt: new Date(Date.now() + 3600 * 1000),
     });
 
-    const frontUrl  = process.env.FRONTEND_URL || '';
+    const frontUrl  = (process.env.FRONTEND_URL || 'https://djibshop.vercel.app').replace(/\/$/, '');
     const resetLink = `${frontUrl}/reset-password?token=${token}`;
 
     const html = `
@@ -488,7 +505,7 @@ app.post('/create-paypal-order', async (req, res) => {
     const { amount, currency = 'USD', items } = req.body;
     if (!amount || isNaN(amount) || amount <= 0) return res.status(400).json({ error: 'Montant invalide' });
     const token    = await getPayPalToken();
-    const frontUrl = process.env.FRONTEND_URL || '';
+    const frontUrl = (process.env.FRONTEND_URL || 'https://djibshop.vercel.app').replace(/\/$/, '');
     const response = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}`, 'PayPal-Request-Id': `djibshop-${Date.now()}` },
@@ -525,7 +542,7 @@ app.get('/health', (req, res) => res.json({
   mongo:  mongoose.connection.readyState === 1,
   stripe: !!process.env.STRIPE_SECRET_KEY,
   paypal: !!process.env.PAYPAL_CLIENT_ID,
-  email:  !!process.env.RESEND_API_KEY,
+  email:  !!process.env.BREVO_API_KEY,
 }));
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -533,6 +550,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   MongoDB : ${process.env.MONGODB_URI ? '✅' : '❌ MONGODB_URI manquant'}`);
   console.log(`   Stripe  : ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`   PayPal  : ${process.env.PAYPAL_CLIENT_ID ? '✅' : '❌'}`);
-  console.log(`   Email   : ${process.env.RESEND_API_KEY ? '✅ Resend' : '❌ RESEND_API_KEY manquant'}`);
+  console.log(`   Email   : ${process.env.BREVO_API_KEY ? '✅ Brevo' : '❌ BREVO_API_KEY manquant'}`);
   console.log(`   Frontend: ${process.env.FRONTEND_URL || '⚠️  non défini'}\n`);
 });
