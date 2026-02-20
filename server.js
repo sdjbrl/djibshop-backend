@@ -59,7 +59,7 @@ const PasswordReset = mongoose.model('PasswordReset', resetSchema);
 (async () => {
   const existing = await User.findOne({ email: 'admin@djibshop.com' }).catch(() => null);
   if (!existing) {
-    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Admin@2025', 10);
+    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Kawthar2604@', 10);
     await User.create({ name: 'Admin', email: 'admin@djibshop.com', password: hashed, isAdmin: true });
     console.log('👤 Compte admin créé');
   }
