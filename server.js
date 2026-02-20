@@ -59,7 +59,7 @@ const PasswordReset = mongoose.model('PasswordReset', resetSchema);
 (async () => {
   const existing = await User.findOne({ email: 'admin@djibshop.com' }).catch(() => null);
   if (!existing) {
-    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Kawthar2604@', 10);
+    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Admin@2025', 10);
     await User.create({ name: 'Admin', email: 'admin@djibshop.com', password: hashed, isAdmin: true });
     console.log('👤 Compte admin créé');
   }
@@ -123,7 +123,11 @@ async function sendOrderNotification({ order, user, items }) {
       <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">ID commande</td><td style="color:#f0a500;font-weight:700">${order.orderId}</td></tr>
       <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">Client</td><td style="color:#e8eaf0">${user.name}</td></tr>
       <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">Email client</td><td style="color:#e8eaf0">${user.email}</td></tr>
-      <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">Paiement</td><td style="color:#e8eaf0">${order.method === 'stripe' ? '💳 Stripe' : '🔵 PayPal'}</td></tr>
+      <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">Paiement</td><td style="color:#e8eaf0">${{
+    stripe:          '💳 Carte bancaire',
+    paypal:          '🔵 PayPal',
+    apple_google_pay:'📱 Apple Pay / Google Pay',
+  }[order.method] || order.method}</td></tr>
       <tr><td style="padding:8px 0;color:#6b7280;font-size:13px">Total</td><td style="color:#f0a500;font-weight:800;font-size:18px">$${order.total.toFixed(2)}</td></tr>
     </table>
     <div style="background:#12141e;border:1px solid #1e2235;border-radius:8px;padding:16px;margin-bottom:20px">
@@ -453,17 +457,35 @@ app.post('/create-payment-intent', async (req, res) => {
   }
 });
 
-app.post('/webhook/stripe', (req, res) => {
+app.post('/webhook/stripe', async (req, res) => {
   const sig    = req.headers['stripe-signature'];
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret) return res.json({ received: true });
   let event;
-  try { event = stripe.webhooks.constructEvent(req.body, sig, secret); }
-  catch (err) { return res.status(400).send('Webhook Error: ' + err.message); }
+
+  if (secret) {
+    try { event = stripe.webhooks.constructEvent(req.body, sig, secret); }
+    catch (err) { return res.status(400).send('Webhook Error: ' + err.message); }
+  } else {
+    // Pas de webhook secret → on parse le body directement (dev/test)
+    try { event = JSON.parse(req.body); } catch { return res.json({ received: true }); }
+  }
+
   if (event.type === 'payment_intent.succeeded') {
     const pi = event.data.object;
-    console.log(`[Stripe Webhook] ✅ ${pi.id} — ${pi.amount / 100} ${pi.currency}`);
+    console.log(`[Stripe Webhook] ✅ ${pi.id} — $${pi.amount / 100} ${pi.currency.toUpperCase()}`);
+
+    // Si une commande existe déjà pour ce PI (créée par le frontend), on ne duplique pas
+    const existing = await Order.findOne({ transactionId: pi.id }).catch(() => null);
+    if (existing) {
+      console.log(`[Webhook] Commande déjà enregistrée pour ${pi.id}`);
+      return res.json({ received: true });
+    }
+
+    // Sinon (cas Apple Pay / paiement rapide où le frontend n'a pas eu le temps), on crée la commande
+    // Note: on ne peut pas connaître les items depuis le webhook seul, donc on log uniquement
+    console.log(`[Webhook] Paiement reçu sans commande associée — montant: $${pi.amount/100}`);
   }
+
   res.json({ received: true });
 });
 
@@ -526,6 +548,10 @@ app.post('/capture-paypal-order/:orderID', async (req, res) => {
 });
 
 // ─── Health ───────────────────────────────────────────
+// Apple Pay domain verification (Stripe)
+// Le fichier est servi par Vercel directement depuis .well-known/
+// Assurez-vous d'enregistrer le domaine dans Stripe Dashboard → Payment Methods → Domains
+
 app.get('/health', (req, res) => res.json({
   status: 'ok', time: new Date().toISOString(),
   mongo:  mongoose.connection.readyState === 1,
