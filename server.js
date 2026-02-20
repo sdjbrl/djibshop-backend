@@ -1,6 +1,6 @@
 // ══════════════════════════════════════════════════════
 //  backend/server.js — Djib's Shop — Railway
-//  MongoDB + Emails (Brevo API) + Stripe + PayPal
+//  MongoDB + Emails (Gmail SMTP) + Stripe + PayPal
 // ══════════════════════════════════════════════════════
 require('dotenv').config();
 
@@ -73,41 +73,62 @@ app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ══════════════════════════════════════════════
-//  EMAIL (Brevo / ex-Sendinblue — HTTP API)
-//  Fonctionne sur Railway, gratuit, sans domaine
-//  1. Créer un compte sur brevo.com
-//  2. SMTP & API → API Keys → Créer une clé
-//  3. Ajouter dans Railway : BREVO_API_KEY=xkeysib-...
-//  4. Vérifier l'adresse expéditeur dans Brevo → Senders
+//  EMAIL (Gmail SMTP via Nodemailer)
+//  ─────────────────────────────────────────────
+//  1. Créer ou utiliser un compte Gmail dédié
+//     ex: djibshop.noreply@gmail.com
+//  2. Activer la validation en 2 étapes sur ce compte
+//  3. Aller sur : myaccount.google.com/apppasswords
+//  4. Générer un mot de passe d'application (16 caractères)
+//  5. Ajouter dans Railway :
+//     GMAIL_USER = djibshop.noreply@gmail.com
+//     GMAIL_PASS = xxxx xxxx xxxx xxxx  (le mot de passe app)
+//     FROM_NAME  = Djib's Shop
 // ══════════════════════════════════════════════
-const FROM_EMAIL = process.env.FROM_EMAIL || 'pro.saidahmed@yahoo.com';
-const FROM_NAME  = process.env.FROM_NAME  || "Djib's Shop";
+const nodemailer = require('nodemailer');
 
-async function sendEmail({ to, subject, html, replyTo }) {
-  const apiKey = process.env.BREVO_API_KEY;
-  if (!apiKey) throw new Error('BREVO_API_KEY manquant dans les variables Railway');
+let _transporter = null;
 
-  const body = {
-    sender:  { name: FROM_NAME, email: FROM_EMAIL },
-    to:      Array.isArray(to) ? to.map(e => ({ email: e })) : [{ email: to }],
-    subject,
-    htmlContent: html,
-  };
-  if (replyTo) body.replyTo = { email: replyTo };
+function getTransporter() {
+  if (_transporter) return _transporter;
 
-  const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
-    method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'api-key':      apiKey,
-    },
-    body: JSON.stringify(body),
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_PASS;
+
+  if (!user || !pass) {
+    console.warn('[Email] ⚠️  GMAIL_USER ou GMAIL_PASS manquant — emails désactivés');
+    return null;
+  }
+
+  _transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user, pass },
   });
 
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error('Brevo error: ' + JSON.stringify(err));
+  return _transporter;
+}
+
+const FROM_NAME  = process.env.FROM_NAME  || "Djib's Shop";
+const FROM_EMAIL = process.env.GMAIL_USER || 'noreply@djibshop.com';
+
+async function sendEmail({ to, subject, html, replyTo }) {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn('[Email] Skipped (pas de config Gmail):', subject);
+    return;
   }
+
+  const toList = Array.isArray(to) ? to.join(', ') : to;
+
+  const info = await transporter.sendMail({
+    from:     `"${FROM_NAME}" <${FROM_EMAIL}>`,
+    to:       toList,
+    subject,
+    html,
+    replyTo:  replyTo || undefined,
+  });
+
+  console.log(`[Email] ✅ Envoyé → ${toList} | ID: ${info.messageId}`);
 }
 
 async function sendOrderNotification({ order, user, items }) {
@@ -335,6 +356,26 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
+
+// DELETE /api/auth/account — Droit à l'effacement (RGPD Art. 17)
+app.delete('/api/auth/account', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    // Anonymiser les commandes (conservation 5 ans obligatoire)
+    await Order.updateMany({ userId }, {
+      $set: { 'userId': null, _anonymized: true, _anonymizedAt: new Date() }
+    });
+    // Supprimer les tokens de reset
+    await PasswordReset.deleteMany({ userId });
+    // Supprimer le compte
+    await User.findByIdAndDelete(userId);
+    console.log(`[RGPD] Compte supprimé: ${userId}`);
+    res.json({ success: true, message: 'Compte et données personnelles supprimés.' });
+  } catch (err) {
+    console.error('[delete account]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 // ══════════════════════════════════════════════
 //  ORDERS ROUTES
 // ══════════════════════════════════════════════
@@ -516,7 +557,10 @@ app.post('/create-paypal-order', async (req, res) => {
     const { amount, currency = 'USD', items } = req.body;
     if (!amount || isNaN(amount) || amount <= 0) return res.status(400).json({ error: 'Montant invalide' });
     const token    = await getPayPalToken();
-    const frontUrl = (process.env.FRONTEND_URL || 'https://djibshop.vercel.app').replace(/\/$/, '');
+    let frontUrl = process.env.FRONTEND_URL || '';
+    if (!frontUrl || frontUrl.trim() === '') frontUrl = 'https://djibshop.vercel.app';
+    if (!frontUrl.startsWith('http')) frontUrl = 'https://' + frontUrl;
+    frontUrl = frontUrl.replace(/\/$/, '');
     const response = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}`, 'PayPal-Request-Id': `djibshop-${Date.now()}` },
@@ -557,7 +601,7 @@ app.get('/health', (req, res) => res.json({
   mongo:  mongoose.connection.readyState === 1,
   stripe: !!process.env.STRIPE_SECRET_KEY,
   paypal: !!process.env.PAYPAL_CLIENT_ID,
-  email:  !!process.env.BREVO_API_KEY,
+  email:  !!(process.env.GMAIL_USER && process.env.GMAIL_PASS),
 }));
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -565,6 +609,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   MongoDB : ${process.env.MONGODB_URI ? '✅' : '❌ MONGODB_URI manquant'}`);
   console.log(`   Stripe  : ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`   PayPal  : ${process.env.PAYPAL_CLIENT_ID ? '✅' : '❌'}`);
-  console.log(`   Email   : ${process.env.BREVO_API_KEY ? '✅ Brevo' : '❌ BREVO_API_KEY manquant'}`);
+  console.log(`   Email   : ${(process.env.GMAIL_USER && process.env.GMAIL_PASS) ? '✅ Gmail SMTP' : '❌ GMAIL_USER/GMAIL_PASS manquants'}`);
   console.log(`   Frontend: ${process.env.FRONTEND_URL || '⚠️  non défini'}\n`);
 });
