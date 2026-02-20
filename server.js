@@ -9,6 +9,7 @@ const cors       = require('cors');
 const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
+const crypto     = require('crypto');
 const { Resend } = require('resend');
 const stripe     = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const fetch      = require('node-fetch');
@@ -45,6 +46,15 @@ const orderSchema = new mongoose.Schema({
 
 const User  = mongoose.model('User',  userSchema);
 const Order = mongoose.model('Order', orderSchema);
+// ── Password Reset Token ─────────────────────────────
+const resetSchema = new mongoose.Schema({
+  userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  token:     { type: String, required: true, unique: true },
+  expiresAt: { type: Date, required: true },
+});
+const PasswordReset = mongoose.model('PasswordReset', resetSchema);
+
+
 
 // ─── Seed admin si absent ────────────────────────────
 (async () => {
@@ -228,6 +238,89 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
     res.json({ user });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// POST /api/auth/forgot-password
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    // Toujours répondre OK (sécurité — ne pas révéler si l'email existe)
+    res.json({ success: true });
+    if (!user) return;
+
+    // Supprimer les anciens tokens
+    await PasswordReset.deleteMany({ userId: user._id });
+
+    // Créer un token sécurisé (1h de validité)
+    const token = crypto.randomBytes(32).toString('hex');
+    await PasswordReset.create({
+      userId:    user._id,
+      token,
+      expiresAt: new Date(Date.now() + 3600 * 1000),
+    });
+
+    const frontUrl  = process.env.FRONTEND_URL || '';
+    const resetLink = `${frontUrl}/reset-password?token=${token}`;
+
+    const html = `
+<div style="font-family:Inter,sans-serif;max-width:520px;margin:0 auto;background:#07080f;color:#e8eaf0;border-radius:12px;overflow:hidden">
+  <div style="background:linear-gradient(135deg,#f0a500,#c88500);padding:22px 28px">
+    <h1 style="margin:0;color:#000;font-size:20px;font-weight:800">🔑 Réinitialisation de mot de passe</h1>
+  </div>
+  <div style="padding:28px">
+    <p style="margin:0 0 8px">Bonjour <strong>${user.name}</strong>,</p>
+    <p style="color:#9ca3af;font-size:14px;margin:0 0 24px">
+      Vous avez demandé à réinitialiser votre mot de passe sur Djib's Shop.<br>
+      Ce lien est valable <strong style="color:#e8eaf0">1 heure</strong>.
+    </p>
+    <a href="${resetLink}" style="display:inline-block;background:linear-gradient(135deg,#f0a500,#c88500);color:#000;font-weight:800;font-size:15px;padding:14px 28px;border-radius:10px;text-decoration:none;">
+      Réinitialiser mon mot de passe →
+    </a>
+    <p style="color:#6b7280;font-size:12px;margin-top:20px">
+      Si vous n'avez pas fait cette demande, ignorez cet email.<br>
+      Lien : <a href="${resetLink}" style="color:#f0a500;word-break:break-all">${resetLink}</a>
+    </p>
+  </div>
+</div>`;
+
+    await sendEmail({
+      to:      user.email,
+      subject: '🔑 Réinitialisation de mot de passe — Djib's Shop',
+      html,
+    });
+    console.log(`[forgot-password] Email envoyé à ${user.email}`);
+  } catch (err) {
+    console.error('[forgot-password]', err.message);
+    // Ne pas exposer l'erreur (déjà répondu OK)
+  }
+});
+
+// POST /api/auth/reset-password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token et mot de passe requis' });
+    if (password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (min 6)' });
+
+    const reset = await PasswordReset.findOne({ token });
+    if (!reset || reset.expiresAt < new Date()) {
+      return res.status(400).json({ error: 'Lien invalide ou expiré. Demandez un nouveau lien.' });
+    }
+
+    const hashed = await bcrypt.hash(password, 10);
+    await User.findByIdAndUpdate(reset.userId, { password: hashed });
+    await PasswordReset.deleteMany({ userId: reset.userId });
+
+    console.log(`[reset-password] Mot de passe changé pour userId ${reset.userId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[reset-password]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
