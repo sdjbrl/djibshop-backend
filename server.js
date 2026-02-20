@@ -291,7 +291,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     await sendEmail({
       to:      user.email,
-      subject: '🔑 Réinitialisation de mot de passe — Djib's Shop',
+      subject: `🔑 Réinitialisation de mot de passe — Djib's Shop`,
       html,
     });
     console.log(`[forgot-password] Email envoyé à ${user.email}`);
