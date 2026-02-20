@@ -1,6 +1,6 @@
 // ══════════════════════════════════════════════════════
 //  backend/server.js — Djib's Shop — Railway
-//  MongoDB + Emails (nodemailer) + Stripe + PayPal
+//  MongoDB + Emails (Resend API) + Stripe + PayPal
 // ══════════════════════════════════════════════════════
 require('dotenv').config();
 
@@ -9,7 +9,7 @@ const cors       = require('cors');
 const mongoose   = require('mongoose');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const stripe     = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const fetch      = require('node-fetch');
 
@@ -75,20 +75,24 @@ app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ══════════════════════════════════════════════
-//  EMAIL (Yahoo SMTP)
+//  EMAIL (Resend API — fonctionne sur Railway)
 // ══════════════════════════════════════════════
-const transporter = nodemailer.createTransport({
-  host:   'smtp.mail.yahoo.com',
-  port:   587,
-  secure: true,
-  auth: {
-    user: process.env.YAHOO_EMAIL,    // ex: saidahmed0610@yahoo.com
-    pass: process.env.YAHOO_APP_PASS, // App Password Yahoo (pas le mdp normal)
-  },
-});
+// RESEND_API_KEY=re_XXXXXXXXXX (resend.com → API Keys)
+// FROM_EMAIL=noreply@VOTRE-DOMAINE.com  (domaine vérifié dans Resend)
+// Si pas de domaine vérifié → utiliser onboarding@resend.dev en test
+const resend = new Resend(process.env.RESEND_API_KEY);
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
 
-// Vérifie la connexion SMTP au démarrage
-transporter.verify().then(() => console.log('✅ SMTP Yahoo connecté')).catch(e => console.warn('⚠️ SMTP Yahoo:', e.message));
+async function sendEmail({ to, subject, html, replyTo }) {
+  const { error } = await resend.emails.send({
+    from:     `Djib's Shop <${FROM_EMAIL}>`,
+    to:       Array.isArray(to) ? to : [to],
+    subject,
+    html,
+    reply_to: replyTo,
+  });
+  if (error) throw new Error('Resend error: ' + JSON.stringify(error));
+}
 
 async function sendOrderNotification({ order, user, items }) {
   const itemsList = items.map(i => `  • ${i.name} — $${i.price.toFixed(2)}`).join('\n');
@@ -119,9 +123,8 @@ async function sendOrderNotification({ order, user, items }) {
   </div>
 </div>`;
 
-  await transporter.sendMail({
-    from:    `"Djib's Shop" <${process.env.YAHOO_EMAIL}>`,
-    to:      process.env.NOTIFY_EMAIL || process.env.YAHOO_EMAIL,
+  await sendEmail({
+    to:      process.env.NOTIFY_EMAIL || 'saidahmed0610@yahoo.com',
     subject: `[Commande] ${order.orderId} — $${order.total.toFixed(2)} — ${user.name}`,
     html,
   });
@@ -149,8 +152,7 @@ async function sendOrderConfirmationToClient({ order, user, items }) {
   </div>
 </div>`;
 
-  await transporter.sendMail({
-    from:    `"Djib's Shop" <${process.env.YAHOO_EMAIL}>`,
+  await sendEmail({
     to:      user.email,
     subject: `✅ Commande ${order.orderId} confirmée — Djib's Shop`,
     html,
@@ -316,12 +318,11 @@ app.post('/api/contact', async (req, res) => {
   </div>
 </div>`;
 
-    await transporter.sendMail({
-      from:     `"Djib's Shop Contact" <${process.env.YAHOO_EMAIL}>`,
-      to:       process.env.CONTACT_EMAIL || process.env.YAHOO_EMAIL,
-      replyTo:  email,
-      subject:  `[Contact] ${subject || 'Message'} — ${name}`,
+    await sendEmail({
+      to:      process.env.CONTACT_EMAIL || 'pro.saidahmed@yahoo.com',
+      subject: `[Contact] ${subject || 'Message'} — ${name}`,
       html,
+      replyTo: email,
     });
 
     res.json({ success: true });
@@ -431,7 +432,7 @@ app.get('/health', (req, res) => res.json({
   mongo:  mongoose.connection.readyState === 1,
   stripe: !!process.env.STRIPE_SECRET_KEY,
   paypal: !!process.env.PAYPAL_CLIENT_ID,
-  smtp:   !!process.env.YAHOO_APP_PASS,
+  email:  !!process.env.RESEND_API_KEY,
 }));
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -439,6 +440,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   MongoDB : ${process.env.MONGODB_URI ? '✅' : '❌ MONGODB_URI manquant'}`);
   console.log(`   Stripe  : ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`   PayPal  : ${process.env.PAYPAL_CLIENT_ID ? '✅' : '❌'}`);
-  console.log(`   SMTP    : ${process.env.YAHOO_APP_PASS ? '✅' : '❌ YAHOO_APP_PASS manquant'}`);
+  console.log(`   Email   : ${process.env.RESEND_API_KEY ? '✅ Resend' : '❌ RESEND_API_KEY manquant'}`);
   console.log(`   Frontend: ${process.env.FRONTEND_URL || '⚠️  non défini'}\n`);
 });
