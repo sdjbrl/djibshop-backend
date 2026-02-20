@@ -66,20 +66,9 @@ const PasswordReset = mongoose.model('PasswordReset', resetSchema);
 })();
 
 // ══════════════════════════════════════════════
-//  CORS
+//  CORS — ouvert à toutes origines (site public)
 // ══════════════════════════════════════════════
-const FRONTEND_URL  = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
-const VERCEL_SLUG   = FRONTEND_URL.replace('https://', '').split('.')[0];
-
-const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
-  if (origin === FRONTEND_URL) return true;
-  if (VERCEL_SLUG && origin.startsWith(`https://${VERCEL_SLUG}-`) && origin.endsWith('.vercel.app')) return true;
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
-  return false;
-};
-
-app.use(cors({ origin: (o, cb) => isAllowedOrigin(o) ? cb(null, true) : cb(new Error('CORS bloqué')), credentials: true }));
+app.use(cors({ origin: true, credentials: true }));
 app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
