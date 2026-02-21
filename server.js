@@ -55,13 +55,31 @@ const PasswordReset = mongoose.model('PasswordReset', resetSchema);
 
 
 
-// ─── Seed admin si absent ────────────────────────────
+// ─── Seed admin + sync mot de passe si ADMIN_PASSWORD changé ────
 (async () => {
-  const existing = await User.findOne({ email: 'admin@djibshop.com' }).catch(() => null);
-  if (!existing) {
-    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Admin@2025', 10);
-    await User.create({ name: 'Admin', email: 'admin@djibshop.com', password: hashed, isAdmin: true });
-    console.log('👤 Compte admin créé');
+  try {
+    const adminPassword = process.env.ADMIN_PASSWORD || 'Kawthar2604@';
+    const existing = await User.findOne({ email: 'admin@djibshop.com' });
+
+    if (!existing) {
+      // Créer le compte admin pour la première fois
+      const hashed = await bcrypt.hash(adminPassword, 10);
+      await User.create({ name: 'Admin', email: 'admin@djibshop.com', password: hashed, isAdmin: true });
+      console.log('👤 Compte admin créé');
+    } else {
+      // Vérifier si le mot de passe actuel correspond à ADMIN_PASSWORD
+      // Si non → le mettre à jour (Railway env var a changé)
+      const match = await bcrypt.compare(adminPassword, existing.password);
+      if (!match) {
+        const hashed = await bcrypt.hash(adminPassword, 10);
+        await User.findByIdAndUpdate(existing._id, { password: hashed });
+        console.log('🔑 Mot de passe admin mis à jour depuis ADMIN_PASSWORD');
+      } else {
+        console.log('👤 Compte admin OK');
+      }
+    }
+  } catch (err) {
+    console.error('[seed admin]', err.message);
   }
 })();
 
@@ -429,6 +447,47 @@ app.get('/api/users', adminMiddleware, async (req, res) => {
     const users = await User.find({ isAdmin: false }).select('-password').sort({ createdAt: -1 });
     res.json({ users });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/users/:id — supprimer un utilisateur (admin)
+app.delete('/api/users/:id', adminMiddleware, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    // Empêcher l'admin de se supprimer lui-même
+    if (userId === req.user.id) return res.status(400).json({ error: 'Impossible de supprimer votre propre compte admin.' });
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    if (user.isAdmin) return res.status(403).json({ error: 'Impossible de supprimer un compte admin.' });
+    // Anonymiser les commandes (obligation légale 5 ans)
+    await Order.updateMany({ userId }, { $set: { userId: null, _anonymized: true, _anonymizedAt: new Date() } });
+    await PasswordReset.deleteMany({ userId });
+    await User.findByIdAndDelete(userId);
+    console.log(`[Admin] Utilisateur supprimé: ${user.email}`);
+    res.json({ success: true, message: `Compte ${user.email} supprimé.` });
+  } catch (err) {
+    console.error('[delete user]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/auth/change-password — changer son propre mot de passe (admin ou user)
+app.put('/api/auth/change-password', authMiddleware, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Champs manquants' });
+    if (newPassword.length < 6) return res.status(400).json({ error: 'Nouveau mot de passe trop court (min 6 car.)' });
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const ok = await bcrypt.compare(currentPassword, user.password);
+    if (!ok) return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+    console.log(`[Auth] Mot de passe changé pour ${user.email}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[change-password]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
