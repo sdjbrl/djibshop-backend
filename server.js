@@ -58,7 +58,7 @@ const PasswordReset = mongoose.model('PasswordReset', resetSchema);
 // ─── Seed admin + sync mot de passe si ADMIN_PASSWORD changé ────
 (async () => {
   try {
-    const adminPassword = process.env.ADMIN_PASSWORD || 'Kawthar2604@';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@2025';
     const existing = await User.findOne({ email: 'admin@djibshop.com' });
 
     if (!existing) {
@@ -91,62 +91,57 @@ app.use('/webhook/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ══════════════════════════════════════════════
-//  EMAIL (Gmail SMTP via Nodemailer)
+//  EMAIL (Resend API — HTTPS, aucun port SMTP)
 //  ─────────────────────────────────────────────
-//  1. Créer ou utiliser un compte Gmail dédié
-//     ex: djibshop.noreply@gmail.com
-//  2. Activer la validation en 2 étapes sur ce compte
-//  3. Aller sur : myaccount.google.com/apppasswords
-//  4. Générer un mot de passe d'application (16 caractères)
-//  5. Ajouter dans Railway :
-//     GMAIL_USER = djibshop.noreply@gmail.com
-//     GMAIL_PASS = xxxx xxxx xxxx xxxx  (le mot de passe app)
-//     FROM_NAME  = Djib's Shop
+//  Railway bloque les ports SMTP (587/465).
+//  Resend fonctionne via HTTPS — aucun blocage.
+//
+//  Setup (2 minutes) :
+//  1. Créer un compte gratuit sur https://resend.com
+//  2. Settings → API Keys → Create API Key
+//  3. Dans Railway → Variables :
+//     RESEND_API_KEY = re_xxxxxxxxxxxxxxxxxxxx
+//     CONTACT_EMAIL  = pro.saidahmed@yahoo.com   (où recevoir les messages)
+//     FROM_NAME      = Djib's Shop
+//
+//  ⚠️  Avec le plan gratuit Resend, les emails partent
+//     de onboarding@resend.dev — suffisant pour les
+//     notifications admin. Pour envoyer DEPUIS votre
+//     propre adresse, vérifiez un domaine dans Resend.
 // ══════════════════════════════════════════════
-const nodemailer = require('nodemailer');
-
-let _transporter = null;
-
-function getTransporter() {
-  if (_transporter) return _transporter;
-
-  const user = process.env.GMAIL_USER;
-  const pass = process.env.GMAIL_PASS;
-
-  if (!user || !pass) {
-    console.warn('[Email] ⚠️  GMAIL_USER ou GMAIL_PASS manquant — emails désactivés');
-    return null;
-  }
-
-  _transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user, pass },
-  });
-
-  return _transporter;
-}
 
 const FROM_NAME  = process.env.FROM_NAME  || "Djib's Shop";
-const FROM_EMAIL = process.env.GMAIL_USER || 'noreply@djibshop.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
 
 async function sendEmail({ to, subject, html, replyTo }) {
-  const transporter = getTransporter();
-  if (!transporter) {
-    console.warn('[Email] Skipped (pas de config Gmail):', subject);
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn('[Email] RESEND_API_KEY manquant — email ignoré:', subject);
     return;
   }
 
-  const toList = Array.isArray(to) ? to.join(', ') : to;
+  const toList = Array.isArray(to) ? to : [to];
 
-  const info = await transporter.sendMail({
-    from:     `"${FROM_NAME}" <${FROM_EMAIL}>`,
-    to:       toList,
+  const body = {
+    from:    `${FROM_NAME} <${FROM_EMAIL}>`,
+    to:      toList,
     subject,
     html,
-    replyTo:  replyTo || undefined,
+  };
+  if (replyTo) body.reply_to = replyTo;
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
   });
 
-  console.log(`[Email] ✅ Envoyé → ${toList} | ID: ${info.messageId}`);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error('Resend error: ' + JSON.stringify(data));
+  console.log(`[Email] ✅ Envoyé → ${toList.join(', ')} | ID: ${data.id}`);
 }
 
 async function sendOrderNotification({ order, user, items }) {
@@ -660,7 +655,7 @@ app.get('/health', (req, res) => res.json({
   mongo:  mongoose.connection.readyState === 1,
   stripe: !!process.env.STRIPE_SECRET_KEY,
   paypal: !!process.env.PAYPAL_CLIENT_ID,
-  email:  !!(process.env.GMAIL_USER && process.env.GMAIL_PASS),
+  email:  !!process.env.RESEND_API_KEY,
 }));
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -668,6 +663,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   MongoDB : ${process.env.MONGODB_URI ? '✅' : '❌ MONGODB_URI manquant'}`);
   console.log(`   Stripe  : ${process.env.STRIPE_SECRET_KEY ? '✅' : '❌'}`);
   console.log(`   PayPal  : ${process.env.PAYPAL_CLIENT_ID ? '✅' : '❌'}`);
-  console.log(`   Email   : ${(process.env.GMAIL_USER && process.env.GMAIL_PASS) ? '✅ Gmail SMTP' : '❌ GMAIL_USER/GMAIL_PASS manquants'}`);
+  console.log(`   Email   : ${process.env.RESEND_API_KEY ? '✅ Resend' : '❌ RESEND_API_KEY manquant'}`);
   console.log(`   Frontend: ${process.env.FRONTEND_URL || '⚠️  non défini'}\n`);
 });
